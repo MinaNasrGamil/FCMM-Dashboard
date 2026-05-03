@@ -12303,8 +12303,64 @@
       return node;
     }
 
-    // Remember the folder handle across clicks so users don't re-pick every time
-    let _savedDirHandle = null;
+    // ─────────────────────────────────────────────
+    // INDEXEDDB HANDLE PERSISTENCE
+    // Stores the FileSystemDirectoryHandle so the user only picks once.
+    // ─────────────────────────────────────────────
+    const IDB_NAME = 'fcmmDashboard';
+    const IDB_STORE = 'handles';
+    const IDB_KEY = 'rootDir';
+
+    function idbOpen() {
+      return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, 1);
+        req.onupgradeneeded = e => e.target.result.createObjectStore(IDB_STORE);
+        req.onsuccess = e => resolve(e.target.result);
+        req.onerror = e => reject(e.target.error);
+      });
+    }
+
+    async function idbSaveHandle(handle) {
+      try {
+        const db = await idbOpen();
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        tx.objectStore(IDB_STORE).put(handle, IDB_KEY);
+        await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+        db.close();
+      } catch(e) { console.warn('Could not save handle to IDB:', e); }
+    }
+
+    async function idbLoadHandle() {
+      try {
+        const db = await idbOpen();
+        const tx = db.transaction(IDB_STORE, 'readonly');
+        const handle = await new Promise((res, rej) => {
+          const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+          req.onsuccess = e => res(e.target.result);
+          req.onerror = e => rej(e.target.error);
+        });
+        db.close();
+        return handle || null;
+      } catch(e) { return null; }
+    }
+
+    async function getOrPickHandle(forceNewPick = false) {
+      if (!forceNewPick) {
+        const stored = await idbLoadHandle();
+        if (stored) {
+          // Check/request permission — browser may grant silently without a prompt
+          let perm = await stored.queryPermission({ mode: 'read' });
+          if (perm !== 'granted') perm = await stored.requestPermission({ mode: 'read' });
+          if (perm === 'granted') return stored;
+        }
+      }
+      // Fall back to folder picker
+      toast('Select your FCMM Dashboard Files folder…');
+      await new Promise(r => setTimeout(r, 600));
+      const picked = await window.showDirectoryPicker({ mode: 'read' });
+      await idbSaveHandle(picked);
+      return picked;
+    }
 
     async function liveUpdate() {
       if (!window.showDirectoryPicker) {
@@ -12321,21 +12377,9 @@
       style.textContent = '@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}';
       document.head.appendChild(style);
       try {
-        // Re-verify permission on saved handle, or ask user to pick
-        if (_savedDirHandle) {
-          const perm = await _savedDirHandle.queryPermission({ mode: 'read' });
-          if (perm !== 'granted') {
-            const req = await _savedDirHandle.requestPermission({ mode: 'read' });
-            if (req !== 'granted') _savedDirHandle = null;
-          }
-        }
-        if (!_savedDirHandle) {
-          toast('Select your FCMM Dashboard Files folder…');
-          await new Promise(r => setTimeout(r, 600));
-          _savedDirHandle = await window.showDirectoryPicker({ mode: 'read' });
-        }
+        const handle = await getOrPickHandle();
         btn.innerHTML = `${spinSVG}<span>Updating…</span>`;
-        const newFS = await fsBuildNode(_savedDirHandle, '');
+        const newFS = await fsBuildNode(handle, '');
         FS = newFS;
         try { localStorage.setItem('fcmmDashboardFS', JSON.stringify(FS)); } catch(e) { console.warn('Could not persist FS:', e); }
         navPath = [];
@@ -12350,7 +12394,6 @@
           console.error('Live update failed:', err);
           toast('Update failed \u2014 see console for details.');
         }
-        _savedDirHandle = null;
         // Don't wipe stored FS on abort/error — keep last good state
       } finally {
         btn.innerHTML = originalHTML;
