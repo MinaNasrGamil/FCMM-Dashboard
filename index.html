@@ -12235,6 +12235,8 @@
     let editTarget = null; // {node, parent} for editing
 
     const DASHBOARD_PASSWORD = 'FCMM1234';
+    const LOCAL_FS_KEY = 'fcmmDashboardFS';
+    const REMOTE_DATA_ENDPOINT = '/api/dashboard-data';
     const ONEDRIVE = {
       domain: 'livebueedu-my.sharepoint.com',
       personalSite: 'personal/ahmed_mehaya_bue_edu_eg',
@@ -12362,6 +12364,52 @@
       return picked;
     }
 
+    function saveLocalSnapshot() {
+      try {
+        localStorage.setItem(LOCAL_FS_KEY, JSON.stringify(FS));
+      } catch (e) {
+        console.warn('Could not persist FS locally:', e);
+      }
+    }
+
+    async function saveSharedSnapshot() {
+      const response = await fetch(REMOTE_DATA_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ data: FS })
+      });
+      if (!response.ok) {
+        throw new Error(`Shared save failed with status ${response.status}`);
+      }
+    }
+
+    async function persistSnapshot(options = {}) {
+      const { shared = true } = options;
+      saveLocalSnapshot();
+      if (!shared) return;
+      await saveSharedSnapshot();
+    }
+
+    function readLocalSnapshot() {
+      try {
+        const saved = localStorage.getItem(LOCAL_FS_KEY);
+        return saved ? JSON.parse(saved) : null;
+      } catch (e) {
+        console.warn('Could not restore FS from local storage:', e);
+        return null;
+      }
+    }
+
+    async function loadSharedSnapshot() {
+      const response = await fetch(REMOTE_DATA_ENDPOINT, { cache: 'no-store' });
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw new Error(`Shared load failed with status ${response.status}`);
+      }
+      const payload = await response.json();
+      return payload?.data || null;
+    }
+
     async function liveUpdate() {
       if (!window.showDirectoryPicker) {
         toast('Your browser does not support this. Use Chrome or Edge.');
@@ -12381,12 +12429,12 @@
         btn.innerHTML = `${spinSVG}<span>Updating…</span>`;
         const newFS = await fsBuildNode(handle, '');
         FS = newFS;
-        try { localStorage.setItem('fcmmDashboardFS', JSON.stringify(FS)); } catch(e) { console.warn('Could not persist FS:', e); }
+        await persistSnapshot({ shared: true });
         navPath = [];
         typeScope = null;
         filter = 'all';
         render();
-        toast('Dashboard updated \u2713');
+        toast('Dashboard updated for everyone \u2713');
       } catch (err) {
         if (err.name === 'AbortError') {
           toast('Folder selection cancelled.');
@@ -12811,9 +12859,10 @@
       document.getElementById('modalOverlay').classList.add('open');
     }
 
-    function saveItem() {
+    async function saveItem() {
       const name = document.getElementById('formName').value.trim();
       if (!name) { toast('Please enter a name'); return; }
+      const isEditing = !!editingName;
 
       const locationPath = document.getElementById('formLocation').value;
       const targetFolder = findFolderByPath(locationPath);
@@ -12833,15 +12882,20 @@
         const cur = node();
         const idx = (cur.children || []).findIndex(c => c.name === editingName);
         if (idx >= 0) { cur.children[idx] = { ...cur.children[idx], ...newItem }; }
-        toast('Item updated âœ“');
       } else {
         targetFolder.children = targetFolder.children || [];
         targetFolder.children.push(newItem);
-        toast('Item added âœ“');
       }
 
-      closeModal();
-      render();
+      try {
+        await persistSnapshot({ shared: true });
+        closeModal();
+        render();
+        toast(isEditing ? 'Item updated for everyone \u2713' : 'Item added for everyone \u2713');
+      } catch (err) {
+        console.error('Could not save item:', err);
+        toast('Saved in this session, but shared sync failed.');
+      }
     }
 
     function deleteItem(name) {
@@ -12851,8 +12905,15 @@
         const confirmed = confirm(`Delete "${name}"?`);
         if (!confirmed) return;
         cur.children.splice(idx, 1);
-        toast('Deleted âœ“');
-        render();
+        persistSnapshot({ shared: true })
+          .then(() => {
+            toast('Deleted for everyone \u2713');
+            render();
+          })
+          .catch(err => {
+            console.error('Could not delete item:', err);
+            toast('Deleted in this session, but shared sync failed.');
+          });
       }
     }
 
@@ -12917,13 +12978,29 @@
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // INIT
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    initializePasswordGate();
-    setSidebarActive('home');
-    try {
-      const saved = localStorage.getItem('fcmmDashboardFS');
-      if (saved) { FS = JSON.parse(saved); }
-    } catch(e) { console.warn('Could not restore FS from storage:', e); }
-    render();
+    async function initializeDashboard() {
+      initializePasswordGate();
+      setSidebarActive('home');
+
+      const localSnapshot = readLocalSnapshot();
+      if (localSnapshot) {
+        FS = localSnapshot;
+      }
+
+      try {
+        const sharedSnapshot = await loadSharedSnapshot();
+        if (sharedSnapshot) {
+          FS = sharedSnapshot;
+          saveLocalSnapshot();
+        }
+      } catch (e) {
+        console.warn('Could not restore FS from shared storage:', e);
+      }
+
+      render();
+    }
+
+    initializeDashboard();
   </script>
 </body>
 
