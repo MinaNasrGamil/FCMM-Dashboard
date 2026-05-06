@@ -1,62 +1,7 @@
 import { list, put } from '@vercel/blob';
-
 const DATA_PATH = 'fcmm/dashboard-data.json';
-
-function json(body, init = {}) {
-const headers = new Headers(init.headers || {});
-headers.set('Cache-Control', 'no-store');
-return Response.json(body, { ...init, headers });
-}
-
-export async function GET() {
-try {
-const { blobs } = await list({ prefix: DATA_PATH, limit: 10 });
-const match = blobs.find(blob => blob.pathname === DATA_PATH);
-if (!match) {
-return json({ error: 'No shared dashboard data found yet.' }, { status: 404 });
-}
-
-const response = await fetch(match.url, { cache: 'no-store' });
-if (!response.ok) {
-return json({ error: 'Stored dashboard data could not be read.' }, { status: 500 });
-}
-
-const payload = await response.json();
-return json({
-data: payload?.data || null,
-updatedAt: payload?.updatedAt || null
-});
-} catch (error) {
-console.error('GET /api/dashboard-data failed:', error);
-return json({ error: 'Could not load shared dashboard data.' }, { status: 500 });
-}
-}
-
-export async function POST(request) {
-try {
-const payload = await request.json();
-if (!payload || typeof payload !== 'object' || !payload.data || payload.data.type !== 'folder') {
-return json({ error: 'Invalid dashboard payload.' }, { status: 400 });
-}
-
-await put(
-DATA_PATH,
-JSON.stringify({
-data: payload.data,
-updatedAt: new Date().toISOString()
-}),
-{
-access: 'public',
-addRandomSuffix: false,
-overwrite: true,
-contentType: 'application/json',
-cacheControlMaxAge: 0
-}
-);
-
-return json({ ok: true });
-} catch (error) {
-console.error('POST /api/dashboard-data failed:', error);
-return json({ error: 'Could not save shared dashboard data.' }, { status: 500 });
-}
-}
+function send(res, status, body){res.setHeader('Cache-Control','no-store');res.setHeader('Content-Type','application/json; charset=utf-8');return res.status(status).send(JSON.stringify(body));}
+function isAuthorized(req){const secret=process.env.FCMM_AGENT_SECRET;if(!secret)return true;const auth=req.headers.authorization||'';const headerSecret=req.headers['x-fcmm-agent-secret'];return auth===`Bearer ${secret}`||headerSecret===secret;}
+async function readJsonBlob(path){const {blobs}=await list({prefix:path,limit:10});const match=blobs.find(b=>b.pathname===path);if(!match)return null;const response=await fetch(match.url,{cache:'no-store'});if(!response.ok)throw new Error(`Blob read failed: ${response.status}`);return response.json();}
+async function writeJsonBlob(path,payload){await put(path,JSON.stringify(payload),{access:'public',addRandomSuffix:false,overwrite:true,contentType:'application/json',cacheControlMaxAge:0});}
+export default async function handler(req,res){try{if(req.method==='GET'){const payload=await readJsonBlob(DATA_PATH);if(!payload)return send(res,404,{error:'No shared dashboard data found yet.'});return send(res,200,{data:payload?.data||null,updatedAt:payload?.updatedAt||null,metadata:payload?.metadata||null});}if(req.method==='POST'){if(!isAuthorized(req))return send(res,401,{error:'Unauthorized dashboard data update.'});const payload=req.body||{};if(!payload||typeof payload!=='object'||!payload.data||payload.data.type!=='folder')return send(res,400,{error:'Invalid dashboard payload.'});const updatedAt=new Date().toISOString();await writeJsonBlob(DATA_PATH,{data:payload.data,updatedAt,metadata:payload.metadata||null});return send(res,200,{ok:true,updatedAt});}res.setHeader('Allow','GET, POST');return send(res,405,{error:'Method not allowed.'});}catch(error){console.error('/api/dashboard-data failed:',error);return send(res,500,{error:'Dashboard data operation failed.'});}}
