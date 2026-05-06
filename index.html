@@ -1403,7 +1403,7 @@
       <div class="topbar">
         <div class="breadcrumb" id="breadcrumb"></div>
         <div class="topbar-right">
-          <a class="topbar-update" href="#" title="Fetch latest files from OneDrive" onclick="event.preventDefault();liveUpdate()">
+          <a class="topbar-update" href="#" title="Request latest files from updater device" onclick="event.preventDefault();liveUpdate()">
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
               <path d="M21 12a9 9 0 0 1-15.31 6.36" />
               <path d="M3 12A9 9 0 0 1 18.31 5.64" />
@@ -12237,6 +12237,7 @@
     const DASHBOARD_PASSWORD = 'FCMM1234';
     const LOCAL_FS_KEY = 'fcmmDashboardFS';
     const REMOTE_DATA_ENDPOINT = '/api/dashboard-data';
+    const SYNC_REQUEST_ENDPOINT = '/api/sync-request';
     const ONEDRIVE = {
       domain: 'livebueedu-my.sharepoint.com',
       personalSite: 'personal/ahmed_mehaya_bue_edu_eg',
@@ -12410,39 +12411,83 @@
       return payload?.data || null;
     }
 
-    async function liveUpdate() {
-      if (!window.showDirectoryPicker) {
-        toast('Your browser does not support this. Use Chrome or Edge.');
-        return;
+    async function requestSync() {
+      const response = await fetch(SYNC_REQUEST_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requestedBy: 'dashboard' })
+      });
+      if (!response.ok) {
+        throw new Error(`Sync request failed with status ${response.status}`);
       }
+      return response.json();
+    }
+
+    async function getSyncStatus() {
+      const response = await fetch(SYNC_REQUEST_ENDPOINT, { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error(`Sync status failed with status ${response.status}`);
+      }
+      return response.json();
+    }
+
+    async function refreshSharedData() {
+      const shared = await loadSharedSnapshot();
+      if (!shared) return false;
+      FS = shared;
+      saveLocalSnapshot();
+      navPath = [];
+      typeScope = null;
+      filter = 'all';
+      render();
+      return true;
+    }
+
+    async function liveUpdate() {
       const btn = document.querySelector('.topbar-update');
       const originalHTML = btn.innerHTML;
       const spinSVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="animation:spin 1s linear infinite"><path d="M21 12a9 9 0 0 1-15.31 6.36"/><path d="M3 12A9 9 0 0 1 18.31 5.64"/><path d="M18 2v4h4"/><path d="M6 22v-4H2"/></svg>';
-      btn.innerHTML = `${spinSVG}<span>Updating…</span>`;
-      btn.style.pointerEvents = 'none';
       const style = document.createElement('style');
       style.id = 'spin-style';
       style.textContent = '@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}';
       document.head.appendChild(style);
+
+      btn.style.pointerEvents = 'none';
+      btn.innerHTML = `${spinSVG}<span>Requesting…</span>`;
+
       try {
-        const handle = await getOrPickHandle();
-        btn.innerHTML = `${spinSVG}<span>Updating…</span>`;
-        const newFS = await fsBuildNode(handle, '');
-        FS = newFS;
-        await persistSnapshot({ shared: true });
-        navPath = [];
-        typeScope = null;
-        filter = 'all';
-        render();
-        toast('Dashboard updated for everyone \u2713');
-      } catch (err) {
-        if (err.name === 'AbortError') {
-          toast('Folder selection cancelled.');
-        } else {
-          console.error('Live update failed:', err);
-          toast('Update failed \u2014 see console for details.');
+        const sync = await requestSync();
+        const requestId = sync.requestId;
+        toast('Update requested. Waiting for updater device…');
+
+        const maxAttempts = 45; // ~90 seconds
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          await new Promise(resolve => setTimeout(resolve, 2000));
+          const statusResult = await getSyncStatus();
+          const state = statusResult.state || {};
+
+          if (state.requestId === requestId && state.status === 'running') {
+            btn.innerHTML = `${spinSVG}<span>Updating…</span>`;
+          }
+
+          if (state.requestId === requestId && state.status === 'completed') {
+            btn.innerHTML = `${spinSVG}<span>Loading…</span>`;
+            const refreshed = await refreshSharedData();
+            toast(refreshed ? 'Dashboard updated ✓' : 'Update completed, but no shared data found.');
+            return;
+          }
+
+          if (state.requestId === requestId && state.status === 'failed') {
+            console.error('Updater failed:', state.error);
+            toast('Update failed on updater device.');
+            return;
+          }
         }
-        // Don't wipe stored FS on abort/error — keep last good state
+
+        toast('Update requested, but updater device did not respond yet.');
+      } catch (err) {
+        console.error('Update request failed:', err);
+        toast('Update request failed — see console for details.');
       } finally {
         btn.innerHTML = originalHTML;
         btn.style.pointerEvents = '';
